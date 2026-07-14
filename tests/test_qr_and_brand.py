@@ -2,10 +2,24 @@
 Tests for the post-detonation telemetry that operates on the sandbox's
 own screenshot output: QR decoding (detect_qr) and brand-impersonation
 pHash matching (brand_phash.BrandMatcher).
+
+PATCH NOTES (post-audit-review fixes):
+  - M8: test_detect_qr_missing_file_fails_gracefully used a hardcoded
+    "/tmp/this-file-does-not-exist-12345.png" path, which doesn't exist
+    by default on Windows (matching the same class of bug already fixed
+    elsewhere in this repo via tempfile.gettempdir()). Now built from
+    tempfile.gettempdir() so the test is portable.
+  - L15: `import imagehash` was previously done inline inside two test
+    functions rather than at module scope. Moved to the top with the
+    other imports -- no functional difference, just avoids the repeated
+    inline import.
 """
 
 import json
+import os
+import tempfile
 
+import imagehash
 import pytest
 
 qrcode = pytest.importorskip("qrcode")
@@ -54,7 +68,8 @@ def test_detect_qr_no_qr_present(tmp_path):
 
 
 def test_detect_qr_missing_file_fails_gracefully():
-    found, urls = detect_qr("/tmp/this-file-does-not-exist-12345.png")
+    missing_path = os.path.join(tempfile.gettempdir(), "this-file-does-not-exist-12345.png")
+    found, urls = detect_qr(missing_path)
     assert found is None
     assert urls == []
 
@@ -75,7 +90,6 @@ def test_brand_matcher_detects_a_close_match(tmp_path):
     draw.text((100, 90), "FakeBrand Login", fill="white")
     img.save(img_path)
 
-    import imagehash
     ref_hash = str(imagehash.phash(Image.open(img_path)))
     ref_path = tmp_path / "reference_hashes.json"
     ref_path.write_text(json.dumps({"fakebrand": ref_hash}))
@@ -96,7 +110,6 @@ def test_brand_matcher_no_match_below_threshold(tmp_path):
     ImageDraw.Draw(ref_img).ellipse([20, 20, 280, 180], fill="red")
     ref_img.save(ref_img_path)
 
-    import imagehash
     ref_hash = str(imagehash.phash(Image.open(ref_img_path)))
     ref_path = tmp_path / "reference_hashes.json"
     ref_path.write_text(json.dumps({"unrelated_brand": ref_hash}))

@@ -14,11 +14,11 @@ OUTPUT SHAPE
     {
       "scans": {...},              "pages": {...},
       "screenshots": {...},        "network_activity": {...},
-      "browser_events": {...},     "tls_connection": {...},
+      "browser_events": {...},     "tls_connections": {...},
       "form_metrics": {...},       "dom_content": {...},
       "phishing_signals": {...},
-      "evasion": [ {...}, ... ],
-      "headers": [ {...}, ... ],
+      "evasion_techniques": [ {...}, ... ],
+      "security_headers": [ {...}, ... ],
       "downloads": [ {...}, ... ],
       "redirects": [ {...}, ... ],
       "timeline": [ {...}, ... ],   # debugging aid, see below
@@ -92,6 +92,24 @@ network is restricted and can't download the Chromium binary):
 RUN:
     python phishing_sandbox_scan.py https://example.com
     python phishing_sandbox_scan.py https://example.com --headful --out result.json
+
+PATCH NOTES (post-audit-review fix):
+  - M2: `protocol_used` was computed from the ORIGINAL requested `url`,
+    not the final, possibly-redirected URL. A page requested over
+    http:// that redirects to https:// (extremely common) was reported
+    as HTTP even though the actual connection ended up on HTTPS. Now
+    derived from `final_url` when available, falling back to the
+    original `url` only if navigation never produced a final URL at all.
+  - DB-schema alignment (against the real sandbox_db DDL, not the
+    earlier shorthand names): top-level output keys renamed
+    "tls_connection" -> "tls_connections", "evasion" -> "evasion_techniques",
+    "headers" -> "security_headers" to match actual table names.
+    `phishing_signals`'s redirect-trigger-types field is now keyed
+    "total_redirect_count" (the real column name, typed TEXT[] despite
+    the count-sounding name). `redirects_rows` now emits the full
+    `redirect_chain` TEXT[] per row instead of a `hop_index` int column
+    that doesn't exist in the schema. `evasion_technique_flags` now
+    emits real booleans (the column is BOOLEAN) instead of 1/0 ints.
 """
 
 import argparse
@@ -106,6 +124,7 @@ import shutil
 import tempfile
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright
@@ -330,7 +349,8 @@ def compute_js_obfuscation_score(inline_script_text):
     # still just a density signal -- weight it below the concrete
     # indicators rather than letting it drive the score on its own.
     score = 0.35 * entropy_component + 0.65 * indicator_component
-    return round(min(score, 1.0), 3)
+    return round(min(score, 1.0), 2)
+
 
 
 def classify_window_opens(events):
@@ -1009,7 +1029,13 @@ async def scan_url(url, timeout_ms=45000, viewport=(1366, 768), request_id=None,
                     except Exception:
                         pass
 
-            protocol_used = "HTTPS" if url.lower().startswith("https") else "HTTP"
+            # M2 FIX: derive protocol_used from the FINAL url (after any
+            # redirects), not the originally-requested one. An http:// ->
+            # https:// redirect (extremely common) was previously reported
+            # as HTTP even though the connection actually ended up on
+            # HTTPS. Falls back to the original `url` only when navigation
+            # never produced a final URL at all (e.g. a total failure).
+            protocol_used = "HTTPS" if (final_url or url).lower().startswith("https") else "HTTP"
             certificate_present = bool(sec)
             certificate_issuer = sec.get("issuer") if sec else None
             tls_version = sec.get("protocol") if sec else None
@@ -1123,7 +1149,17 @@ async def scan_url(url, timeout_ms=45000, viewport=(1366, 768), request_id=None,
                 size = None
                 quarantined_path = None
                 try:
-                    tmp_path = await d.path()
+                    # Defensive: Path() wrap around d.path()'s result.
+                    # Playwright's async API is typed to return
+                    # Optional[pathlib.Path] here at the version pinned
+                    # in docker/requirements.txt, so this is a no-op
+                    # today (Path(existing_path_obj) is idempotent) --
+                    # it's just cheap insurance against a future
+                    # Playwright version changing that return type to a
+                    # plain str, which would otherwise make .stat() /
+                    # .unlink() below raise AttributeError.
+                    raw_path = await d.path()
+                    tmp_path = Path(raw_path) if raw_path else None
                     if tmp_path:
                         size = tmp_path.stat().st_size
                         if size <= MAX_DOWNLOAD_BYTES:
@@ -1153,13 +1189,19 @@ async def scan_url(url, timeout_ms=45000, viewport=(1366, 768), request_id=None,
             if downloads_rows:
                 mark(f"{len(downloads_rows)} download(s) captured")
 
+            # Matches the real sandbox_db schema exactly: the redirects
+            # table has redirect_chain TEXT[] + redirect_url + http_status_code
+            # -- there is no hop_index column. Each row does duplicate the
+            # full chain (that's the schema as designed, not a leftover
+            # bug); position within `chain` is preserved by iteration
+            # order rather than an explicit index column.
             redirects_rows = []
-            for i, hop_url in enumerate(chain):
+            for hop_url in chain:
                 status = next((r["status"] for r in responses if r["url"] == hop_url), None)
                 redirects_rows.append({
                     "redirect_id": str(uuid.uuid4()),
                     "scan_id": scan_id,
-                    "hop_index": i,
+                    "redirect_chain": chain,
                     "redirect_url": hop_url,
                     "http_status_code": status,
                 })
@@ -1169,7 +1211,10 @@ async def scan_url(url, timeout_ms=45000, viewport=(1366, 768), request_id=None,
                     "technique_id": str(uuid.uuid4()),
                     "scan_id": scan_id,
                     "technique_name": name,
-                    "evasion_technique_flags": 1 if re.search(pat, inline_script_text) else 0,
+                    # BOOLEAN column in evasion_techniques -- True/False,
+                    # not 1/0 (an int into a BOOLEAN column is a type
+                    # mismatch for most DB drivers).
+                    "evasion_technique_flags": bool(re.search(pat, inline_script_text)),
                 }
                 for name, pat in EVASION_PATTERNS.items()
             ]
@@ -1257,7 +1302,8 @@ async def scan_url(url, timeout_ms=45000, viewport=(1366, 768), request_id=None,
             "clipboard_read_attempts": counters.get("clipboard_read_attempts", 0),
             "clipboard_write_attempts": counters.get("clipboard_write_attempts", 0),
         },
-        "tls_connection": {
+        # Table is "tls_connections" (plural) in the real schema.
+        "tls_connections": {
             "tls_id": str(uuid.uuid4()),
             "scan_id": scan_id,
             "protocol_used": protocol_used,
@@ -1289,7 +1335,11 @@ async def scan_url(url, timeout_ms=45000, viewport=(1366, 768), request_id=None,
             "phish_id": str(uuid.uuid4()),
             "scan_id": scan_id,
             "base64_encoded_script_count": base64_encoded_script_count,
-            "redirect_trigger_types": redirect_trigger_types,
+            # Column name in the real schema is total_redirect_count,
+            # typed TEXT[] -- despite the "count"-sounding name it holds
+            # the redirect TRIGGER TYPE strings (e.g. "meta_refresh",
+            # "js_redirect"), matching this list's actual contents.
+            "total_redirect_count": redirect_trigger_types,
             "qr_code_detected": qr_code_detected,
             "cloaking_detected": cloaking_detected,
             "js_obfuscation_score": js_obfuscation_score,
@@ -1302,8 +1352,10 @@ async def scan_url(url, timeout_ms=45000, viewport=(1366, 768), request_id=None,
             # None whenever no reference_hashes.json is configured.
             "brand_impersonation_match": brand_match,
         },
-        "evasion": evasion_rows,
-        "headers": headers_rows,
+        # Table names in the real schema: evasion_techniques and
+        # security_headers, not the earlier shorthand names.
+        "evasion_techniques": evasion_rows,
+        "security_headers": headers_rows,
         "downloads": downloads_rows,
         "redirects": redirects_rows,
         "timeline": timeline,

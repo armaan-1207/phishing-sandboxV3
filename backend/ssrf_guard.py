@@ -12,6 +12,25 @@ Used by:
     egress_proxy.py closes that gap completely by making the SAME
     resolution that gets validated the SAME one that gets connected to;
     see its module docstring.
+
+PATCH NOTES (post-audit-review fixes):
+  - M1: asyncio.get_event_loop() is deprecated outside a running loop
+    context as of Python 3.10+; switched to get_running_loop(), which is
+    always correct inside these async functions.
+  - H3: the cache's check -> resolve -> evict -> write sequence had no
+    locking. Two concurrent scans cache-missing on the same hostname
+    could both resolve and both evict/write. A single asyncio.Lock now
+    guards the read and the write; the actual DNS resolution itself
+    stays OUTSIDE the lock (it's I/O bound and shouldn't block other
+    lookups on unrelated hostnames).
+  - M3: a failed resolution (ips == []) used to get cached for the FULL
+    5-minute TTL, meaning one transient DNS hiccup could keep a
+    legitimate target blocked for 5 minutes. Failed lookups now get a
+    much shorter TTL so a real transient failure self-heals quickly,
+    while a successful resolution still gets the full TTL.
+  - L6: "::1" (IPv6 loopback as a literal hostname) is now fast-path
+    blocked the same way "localhost" already was, rather than relying
+    solely on _is_blocked_ip's parse of the resolved address.
 """
 
 import asyncio
@@ -31,17 +50,25 @@ logger = logging.getLogger("phishing_sandbox.ssrf_guard")
 # internal — caching the SSRF check makes the cache itself a staleness
 # risk, not just a memory one.
 _DNS_CACHE_MAX_ENTRIES = 2000
-_DNS_CACHE_TTL_SECONDS = 300  # 5 minutes
+_DNS_CACHE_TTL_SECONDS = 300  # 5 minutes — successful resolutions
+_DNS_FAILURE_TTL_SECONDS = 10  # failed resolutions — short, so a transient
+                                # DNS blip doesn't block a legit target for
+                                # anywhere close to the full 5 minutes
 _dns_cache = {}  # hostname -> (ips: list[str], expiry: float monotonic time)
+_dns_cache_lock = asyncio.Lock()
 
 
 async def _resolve_all_ips(hostname):
     now = time.monotonic()
-    cached = _dns_cache.get(hostname)
-    if cached and cached[1] > now:
-        return cached[0]
+    async with _dns_cache_lock:
+        cached = _dns_cache.get(hostname)
+        if cached and cached[1] > now:
+            return cached[0]
 
-    loop = asyncio.get_event_loop()
+    # Resolution itself happens OUTSIDE the lock — it's I/O bound (a
+    # thread-pool call), and holding the lock across it would serialize
+    # DNS lookups for every hostname in flight, not just this one.
+    loop = asyncio.get_running_loop()
     try:
         infos = await loop.run_in_executor(None, socket.getaddrinfo, hostname, None)
         ips = list({info[4][0] for info in infos})
@@ -49,14 +76,16 @@ async def _resolve_all_ips(hostname):
         logger.warning("DNS resolution failed for %s: %s", hostname, e, exc_info=True)
         ips = []
 
-    if len(_dns_cache) >= _DNS_CACHE_MAX_ENTRIES:
-        # dicts preserve insertion order in modern Python -- this evicts
-        # the oldest entry rather than letting the cache grow unbounded.
-        # Not true LRU (doesn't bump recently-used entries), but cheap
-        # and sufficient to cap memory; swap for a real LRU structure if
-        # you need eviction to favor hot domains specifically.
-        _dns_cache.pop(next(iter(_dns_cache)))
-    _dns_cache[hostname] = (ips, now + _DNS_CACHE_TTL_SECONDS)
+    async with _dns_cache_lock:
+        ttl = _DNS_CACHE_TTL_SECONDS if ips else _DNS_FAILURE_TTL_SECONDS
+        if len(_dns_cache) >= _DNS_CACHE_MAX_ENTRIES and hostname not in _dns_cache:
+            # dicts preserve insertion order in modern Python -- this evicts
+            # the oldest entry rather than letting the cache grow unbounded.
+            # Not true LRU (doesn't bump recently-used entries), but cheap
+            # and sufficient to cap memory; swap for a real LRU structure if
+            # you need eviction to favor hot domains specifically.
+            _dns_cache.pop(next(iter(_dns_cache)))
+        _dns_cache[hostname] = (ips, time.monotonic() + ttl)
     return ips
 
 
@@ -69,6 +98,14 @@ def _is_blocked_ip(ip_str):
         ip.is_private or ip.is_loopback or ip.is_link_local or
         ip.is_multicast or ip.is_reserved or ip.is_unspecified
     )
+
+
+def _is_fast_path_blocked_hostname(host):
+    """Hostnames that should never even reach DNS resolution — checked
+    as literal strings since they either bypass resolution entirely
+    (loopback literals) or resolve inconsistently across environments."""
+    host = host.lower()
+    return host == "localhost" or host == "::1" or host == "[::1]"
 
 
 async def is_target_allowed(url, allow_private_targets=False):
@@ -89,7 +126,7 @@ async def is_target_allowed(url, allow_private_targets=False):
     host = urlparse(url).hostname
     if not host:
         return False
-    if host.lower() == "localhost":
+    if _is_fast_path_blocked_hostname(host):
         return False
     ips = await _resolve_all_ips(host)
     if not ips:
@@ -105,7 +142,7 @@ async def resolve_validated_ip(hostname, allow_private_targets=False):
     this exact returned IP, not re-resolve the hostname a second time —
     re-resolving is exactly the gap that lets DNS rebinding work.
     """
-    if hostname.lower() == "localhost" and not allow_private_targets:
+    if _is_fast_path_blocked_hostname(hostname) and not allow_private_targets:
         return None
     ips = await _resolve_all_ips(hostname)
     if allow_private_targets:

@@ -2,6 +2,14 @@
 Tests for backend/ssrf_guard.py — the bounded+TTL DNS cache and the
 private/reserved-IP blocking logic that egress_proxy.py and
 phishing_sandbox_scan.py both build on.
+
+PATCH NOTES (post-audit-review fix):
+  - L8/L9: test_dns_cache_hit_within_ttl_does_not_re_resolve previously
+    defined an unused `counting_getaddrinfo` helper and an unused
+    `real_run_in_executor` variable -- neither was ever called; the
+    test actually exercises `fake_run_in_executor` via the monkeypatch
+    below. Removed both as dead code with no functional change to what
+    the test verifies.
 """
 
 import asyncio
@@ -73,12 +81,6 @@ async def test_dns_cache_hit_within_ttl_does_not_re_resolve(monkeypatch):
     sg._dns_cache.clear()
     call_count = {"n": 0}
 
-    async def counting_getaddrinfo(*args, **kwargs):
-        call_count["n"] += 1
-        return [(None, None, None, None, ("93.184.216.34", 0))]
-
-    real_run_in_executor = asyncio.get_event_loop().run_in_executor
-
     async def fake_run_in_executor(executor, func, *args):
         call_count["n"] += 1
         return [(None, None, None, None, ("93.184.216.34", 0))]
@@ -90,3 +92,26 @@ async def test_dns_cache_hit_within_ttl_does_not_re_resolve(monkeypatch):
     await sg._resolve_all_ips("cache-hit-test.invalid")
 
     assert call_count["n"] == 1, "repeated lookups within the TTL window must hit the cache, not re-resolve"
+
+
+async def test_failed_resolution_uses_short_failure_ttl_not_full_ttl(monkeypatch):
+    """
+    Regression test for M3: a failed resolution (ips == []) used to be
+    cached for the full 5-minute TTL, meaning one transient DNS blip
+    could keep a legitimate target blocked for 5 minutes. A failed
+    lookup should expire much sooner than a successful one.
+    """
+    sg._dns_cache.clear()
+
+    async def failing_run_in_executor(executor, func, *args):
+        raise OSError("simulated DNS failure")
+
+    monkeypatch.setattr(asyncio.get_event_loop(), "run_in_executor", failing_run_in_executor)
+    await sg._resolve_all_ips("always-fails.invalid")
+
+    ips, expiry = sg._dns_cache["always-fails.invalid"]
+    assert ips == []
+    remaining = expiry - __import__("time").monotonic()
+    assert remaining <= sg._DNS_FAILURE_TTL_SECONDS, (
+        "a failed resolution must use the short failure TTL, not the full success TTL"
+    )

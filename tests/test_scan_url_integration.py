@@ -7,6 +7,14 @@ This isn't trying to assert much about CONTENT (that's heuristic and
 expected to vary) -- it's asserting that the whole pipeline runs
 without raising, returns the full 13-table-shaped result, and that the
 egress-proxy-routed traffic actually reached the real site.
+
+PATCH NOTES (post-audit-review fix):
+  - EXPECTED_TOP_LEVEL_KEYS updated to match the real sandbox_db DDL:
+    "tls_connection" -> "tls_connections", "evasion" -> "evasion_techniques",
+    "headers" -> "security_headers". scan_url()'s output was
+    intentionally changed to align with those exact table names -- this
+    test's expectations were stale against the shorthand names used
+    before that alignment, not the other way around.
 """
 
 import pytest
@@ -18,8 +26,8 @@ pytestmark = pytest.mark.integration
 
 EXPECTED_TOP_LEVEL_KEYS = {
     "scans", "pages", "screenshots", "network_activity", "browser_events",
-    "tls_connection", "form_metrics", "dom_content", "phishing_signals",
-    "evasion", "headers", "downloads", "redirects", "timeline",
+    "tls_connections", "form_metrics", "dom_content", "phishing_signals",
+    "evasion_techniques", "security_headers", "downloads", "redirects", "timeline",
 }
 
 
@@ -44,7 +52,7 @@ async def test_full_scan_against_real_site_via_pool_and_egress_proxy(chromium_br
     assert result["pages"]["final_url"].startswith("https://github.com")
     assert result["scans"]["scan_id"]
     assert result.get("ssrf_blocked_requests") is None, "a real site shouldn't trip the SSRF guard"
-    assert isinstance(result["evasion"], list) and len(result["evasion"]) > 0
+    assert isinstance(result["evasion_techniques"], list) and len(result["evasion_techniques"]) > 0
     assert isinstance(result["timeline"], list) and len(result["timeline"]) > 0
 
 

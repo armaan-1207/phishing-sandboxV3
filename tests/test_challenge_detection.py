@@ -9,6 +9,13 @@ reloads itself after clearing (the actual mechanism real Cloudflare
 challenges use) -- and the original implementation treated that
 transient error as permanent failure, giving up right when the real
 answer was one poll away. See README.md's changelog for the full story.
+
+PATCH NOTES (post-audit-review fix):
+  - L10: every test here called `page.close()` as the LAST line, after
+    the asserts. If an assert failed, `page.close()` never ran, leaking
+    a page on the shared browser for the rest of that test's cleanup.
+    Each test now opens its page in a try/finally so it's always closed
+    regardless of assertion outcome.
 """
 
 import pytest
@@ -51,13 +58,15 @@ async def test_challenge_that_never_clears_is_reported_unresolved(chromium_brows
 
     port = await http_server(never_clears)
     page = await chromium_browser.new_page()
-    await page.goto(f"http://127.0.0.1:{port}/", timeout=5000)
+    try:
+        await page.goto(f"http://127.0.0.1:{port}/", timeout=5000)
 
-    detected, resolved = await wait_for_challenge_to_clear(page, max_wait_seconds=3)
+        detected, resolved = await wait_for_challenge_to_clear(page, max_wait_seconds=3)
 
-    assert detected is True
-    assert resolved is False
-    await page.close()
+        assert detected is True
+        assert resolved is False
+    finally:
+        await page.close()
 
 
 async def test_challenge_that_self_reloads_and_clears_is_reported_resolved(chromium_browser, http_server):
@@ -77,17 +86,19 @@ async def test_challenge_that_self_reloads_and_clears_is_reported_resolved(chrom
 
     port = await http_server(clears_on_second_request)
     page = await chromium_browser.new_page()
-    await page.goto(f"http://127.0.0.1:{port}/", timeout=5000)
+    try:
+        await page.goto(f"http://127.0.0.1:{port}/", timeout=5000)
 
-    detected, resolved = await wait_for_challenge_to_clear(page, max_wait_seconds=5)
+        detected, resolved = await wait_for_challenge_to_clear(page, max_wait_seconds=5)
 
-    assert detected is True
-    assert resolved is True, (
-        "if this regresses, check that the polling loop CONTINUES past a "
-        "transient page.content() error during navigation, rather than "
-        "breaking out and reporting unresolved"
-    )
-    await page.close()
+        assert detected is True
+        assert resolved is True, (
+            "if this regresses, check that the polling loop CONTINUES past a "
+            "transient page.content() error during navigation, rather than "
+            "breaking out and reporting unresolved"
+        )
+    finally:
+        await page.close()
 
 
 async def test_page_with_no_challenge_returns_immediately(chromium_browser, http_server):
@@ -97,13 +108,15 @@ async def test_page_with_no_challenge_returns_immediately(chromium_browser, http
 
     port = await http_server(clean_page)
     page = await chromium_browser.new_page()
-    await page.goto(f"http://127.0.0.1:{port}/", timeout=5000)
+    try:
+        await page.goto(f"http://127.0.0.1:{port}/", timeout=5000)
 
-    detected, resolved = await wait_for_challenge_to_clear(page, max_wait_seconds=3)
+        detected, resolved = await wait_for_challenge_to_clear(page, max_wait_seconds=3)
 
-    assert detected is False
-    assert resolved is True
-    await page.close()
+        assert detected is False
+        assert resolved is True
+    finally:
+        await page.close()
 
 
 async def test_challenge_marker_in_hidden_config_is_not_a_false_positive(chromium_browser, http_server):
@@ -139,13 +152,15 @@ async def test_challenge_marker_in_hidden_config_is_not_a_false_positive(chromiu
 
     port = await http_server(page_with_hidden_captcha_string)
     page = await chromium_browser.new_page()
-    await page.goto(f"http://127.0.0.1:{port}/", timeout=5000)
+    try:
+        await page.goto(f"http://127.0.0.1:{port}/", timeout=5000)
 
-    detected, resolved = await wait_for_challenge_to_clear(page, max_wait_seconds=2)
+        detected, resolved = await wait_for_challenge_to_clear(page, max_wait_seconds=2)
 
-    assert detected is False, (
-        "a 'captcha'-like substring buried in a script's JSON config, invisible to "
-        "any real user, must not be treated as an active bot-challenge"
-    )
-    assert resolved is True
-    await page.close()
+        assert detected is False, (
+            "a 'captcha'-like substring buried in a script's JSON config, invisible to "
+            "any real user, must not be treated as an active bot-challenge"
+        )
+        assert resolved is True
+    finally:
+        await page.close()

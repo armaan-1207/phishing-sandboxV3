@@ -43,6 +43,16 @@ own resolution, which this code has no visibility into. The target's
 hostname is still validated before chaining at all, so a private/
 internal target is still rejected; what's lost in that mode specifically
 is protection against the upstream proxy itself being rebinding-tricked.
+
+PATCH NOTES (post-audit-review fix):
+  - M4: `_handle_plain_http`'s early-return error paths (400/403/502)
+    wrote a response but never awaited `client_writer.drain()` before
+    returning. Without draining, the write can still be sitting in the
+    asyncio transport's internal buffer when the connection is torn
+    down by the caller/finally block, and the client may never actually
+    see the response. Every early return in that function now drains
+    before returning, matching the pattern `_handle_connect` already
+    used correctly.
 """
 
 import asyncio
@@ -124,18 +134,21 @@ async def _handle_plain_http(client_reader, client_writer, request_line, headers
         method, target, _ = request_line.split(" ", 2)
     except ValueError:
         client_writer.write(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+        await client_writer.drain()
         return
 
     parsed = urlparse(target)
     host, port = parsed.hostname, (parsed.port or 80)
     if not host:
         client_writer.write(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+        await client_writer.drain()
         return
 
     validated_ip = await resolve_validated_ip(host, allow_private_targets=allow_private_targets)
     if validated_ip is None:
         logger.warning("egress proxy blocked HTTP request to %s (no validated public IP)", host)
         client_writer.write(b"HTTP/1.1 403 Forbidden\r\n\r\n")
+        await client_writer.drain()
         return
 
     connect_to = upstream_proxy if upstream_proxy else (validated_ip, port)
@@ -144,6 +157,7 @@ async def _handle_plain_http(client_reader, client_writer, request_line, headers
     except Exception as e:
         logger.warning("egress proxy could not connect upstream for %s: %s", host, e, exc_info=True)
         client_writer.write(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+        await client_writer.drain()
         return
 
     path = parsed.path or "/"
