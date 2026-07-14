@@ -1,0 +1,34 @@
+version: "3.9"
+
+# This is a single-container, run-per-job tool, not a persistent service
+# -- there's no port to expose and nothing to depend on. `docker compose
+# run` (not `up`) is the normal way to invoke it; see README.md.
+#
+# The `shared_scans` volume is where this container writes output when
+# given --output-dir /app/output — mount the SAME named volume in
+# Backend Team's own orchestrator container to read results back. See
+# ../DOCKER_ARCHITECTURE_IDEATION.md for how that connects.
+
+services:
+  sandbox:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    # --- Security hardening -------------------------------------------
+    # The container/non-root-user boundary is the real isolation layer
+    # here (Chromium runs --no-sandbox to match — see phishing_sandbox_scan.py).
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: "2g"        # a malicious page spawning workers/timers shouldn't OOM the host
+    cpus: "1.5"
+    pids_limit: 512        # caps fork-bomb-style exhaustion (e.g. window.open() spam)
+    shm_size: "1gb"        # Chromium needs more than Docker's tiny 64MB default /dev/shm
+    volumes:
+      - shared_scans:/app/output
+
+volumes:
+  shared_scans:

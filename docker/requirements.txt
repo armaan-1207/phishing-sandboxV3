@@ -1,0 +1,12 @@
+# Sandbox container dependencies ONLY -- phishing_sandbox_scan.py,
+# ssrf_guard.py, egress_proxy.py, brand_phash.py, build_reference_set.py.
+# Backend Team's own API/Celery layer (handoff_reference/) has its own
+# separate dependency list -- fastapi/uvicorn/pydantic/httpx/redis/
+# pdfplumber/python-docx/beautifulsoup4/python-multipart are NOT needed
+# in this image at all.
+playwright==1.47.0
+playwright-stealth==2.0.3
+pyzbar==0.1.9
+opencv-python-headless==4.10.0.84
+imagehash==4.3.1
+pillow==10.4.0
