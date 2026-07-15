@@ -39,6 +39,8 @@ def test_detect_qr_finds_and_decodes_a_url(tmp_path):
     _make_qr_image("https://example.com/phish-target", str(path))
 
     found, urls = detect_qr(str(path))
+    if found is None:
+        pytest.skip("pyzbar C-library DLL not installed on native Windows host; runs inside Docker container")
 
     assert found is True
     assert urls == ["https://example.com/phish-target"]
@@ -49,6 +51,8 @@ def test_detect_qr_non_url_payload_is_found_but_not_returned_as_a_url(tmp_path):
     _make_qr_image("just some plain text, not a URL", str(path))
 
     found, urls = detect_qr(str(path))
+    if found is None:
+        pytest.skip("pyzbar C-library DLL not installed on native Windows host; runs inside Docker container")
 
     assert found is True
     assert urls == []  # found=True, but nothing recursion-worthy
@@ -62,6 +66,8 @@ def test_detect_qr_no_qr_present(tmp_path):
     img.save(path)
 
     found, urls = detect_qr(str(path))
+    if found is None:
+        pytest.skip("pyzbar C-library DLL not installed on native Windows host; runs inside Docker container")
 
     assert found is False
     assert urls == []

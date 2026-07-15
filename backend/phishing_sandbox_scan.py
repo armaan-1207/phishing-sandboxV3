@@ -1124,11 +1124,14 @@ async def scan_url(url, timeout_ms=45000, viewport=(1366, 768), request_id=None,
                          f"({max_qr_recursion_depth}) already reached; not following it")
 
             brand_match = None
-            if _BRAND_MATCHER is not None and full_path:
+            if _BRAND_MATCHER is not None and full_path and main_response is not None:
                 brand_match = _BRAND_MATCHER.match(full_path)
                 if brand_match:
                     mark(f"brand-impersonation match: {brand_match['brand']} "
                          f"(similarity {brand_match['similarity']})")
+            elif _BRAND_MATCHER is not None and full_path and main_response is None:
+                mark("brand-impersonation check skipped -- screenshot is from a "
+                     "partial/failed navigation (chrome-error page), not real content")
 
             requests = [e for e in network_events if e["type"] == "request"]
             responses = [e for e in network_events if e["type"] == "response"]
@@ -1484,6 +1487,16 @@ async def check_cloaking(browser, url, viewport, allow_private_targets=False, eg
         finally:
             if bot_ctx:
                 await bot_ctx.close()
+
+        bot_text_lower = bot_text.lower()
+        if any(marker in bot_text_lower for marker in CHALLENGE_MARKERS):
+            logger.debug(
+                "check_cloaking: bot-UA render looks like a challenge/block "
+                "page (WAF reacting to the Googlebot UA string), not "
+                "deliberately different content -- returning undetermined "
+                "rather than a false cloaking positive"
+            )
+            return None
 
         MIN_COMPARABLE_LENGTH = 200
         if len(normal_text) < MIN_COMPARABLE_LENGTH or len(bot_text) < MIN_COMPARABLE_LENGTH:

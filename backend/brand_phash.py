@@ -1,23 +1,4 @@
 """
-Perceptual-hash (pHash) brand-impersonation matching.
-
-WHAT THIS DOES: hashes a screenshot and compares it against a reference
-set of {brand_name: phash_hex} entries. A close match between an
-illegitimate domain's screenshot and a known brand's login-page hash is
-a strong "this is impersonating that brand" signal — the same idea
-mobileCLIP was doing in the bigger pipeline's Stage 2, just with a much
-cheaper/older technique (pHash, not a vision model).
-
-WHAT THIS DELIBERATELY DOES NOT DO: ship any reference images or hashes
-of real brands' login pages. Those screenshots belong to the
-brands/aren't mine to redistribute, and a hardcoded hash set would go
-stale the moment a brand redesigns their login page anyway. Build your
-own reference set with `build_reference_set.py` below, pointed at
-screenshots you have the rights to use (e.g. ones your org captured
-directly from the live sites for this exact purpose) — the output is
-just a JSON file of {brand: hex_string} pairs; the hashes themselves
-aren't reproductions of the images, so nothing copyright-sensitive ships
-in this repo.
 
 USAGE
 -----

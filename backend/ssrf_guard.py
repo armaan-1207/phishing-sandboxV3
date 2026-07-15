@@ -134,6 +134,15 @@ async def is_target_allowed(url, allow_private_targets=False):
     return not any(_is_blocked_ip(ip) for ip in ips)
 
 
+def _sort_ips_ipv4_first(ips):
+    def sort_key(ip_str):
+        try:
+            return 0 if ipaddress.ip_address(ip_str).version == 4 else 1
+        except ValueError:
+            return 2
+    return sorted(ips, key=sort_key)
+
+
 async def resolve_validated_ip(hostname, allow_private_targets=False):
     """
     Returns ONE validated-safe IP string for `hostname`, or None if none
@@ -147,7 +156,7 @@ async def resolve_validated_ip(hostname, allow_private_targets=False):
     ips = await _resolve_all_ips(hostname)
     if allow_private_targets:
         return ips[0] if ips else None
-    for ip in ips:
+    for ip in _sort_ips_ipv4_first(ips):
         if not _is_blocked_ip(ip):
             return ip
     return None

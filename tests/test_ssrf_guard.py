@@ -60,6 +60,7 @@ async def test_dns_cache_is_bounded(monkeypatch):
 
 async def test_dns_cache_entries_expire(monkeypatch):
     monkeypatch.setattr(sg, "_DNS_CACHE_TTL_SECONDS", 0.2)
+    monkeypatch.setattr(sg, "_DNS_FAILURE_TTL_SECONDS", 0.2)
     sg._dns_cache.clear()
 
     await sg._resolve_all_ips("expiry-test.invalid")

@@ -28,7 +28,8 @@ COPY docker/requirements.txt .
 # doesn't exist on Debian and fails the build. The apt-get list above
 # already covers what headless Chromium actually needs.
 RUN pip install --no-cache-dir -r requirements.txt
-
+# Note: testing/ and batch evaluation harnesses are deliberately excluded
+# from this image so only the single-scan production engine is shipped.
 COPY backend/ ./backend/
 
 # Non-root, capability-dropped at the docker-compose/run level (see

@@ -30,5 +30,6 @@ services:
     volumes:
       - shared_scans:/app/output
 
+
 volumes:
   shared_scans:
